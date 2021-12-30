@@ -150,7 +150,7 @@ async def main(options):
 if __name__ == '__main__':
     op = OptionParser()
     op.add_option("-l", "--log", action="store", default=None)
-    op.add_option("--folder", action="store", default="/home/dmitrii/PycharmProjects/otus_hw14/output")
+    op.add_option("--folder", action="store", default="output")
     op.add_option("--timeout", action="store", default=3)
     op.add_option("--max_retry", action="store", default=3)
     op.add_option("--time_retry", action="store", default=1)
