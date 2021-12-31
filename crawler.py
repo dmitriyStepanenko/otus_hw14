@@ -51,10 +51,12 @@ async def get_page_by_url(session: aiohttp.ClientSession, url, options) -> str:
             if response.status != 200:
                 await asyncio.sleep(options.time_retry)
                 continue
-
-            text = await response.text()
-            logging.info(f'page from {url} was load')
-            return text
+            else:
+                text = await response.text()
+                logging.info(f'page {url} was load')
+                return text
+    logging.info(f'page {url} was not load')
+    return ''
 
 
 async def save_page(res, filename):
@@ -91,78 +93,70 @@ async def get_urls_from_comments(session, comments_url, options) -> Optional[lis
     if comments_url is None:
         return
     comments_page = await get_page_by_url(session, comments_url, options)
-    return parse_comments_page(comments_page)
-
-
-def split_list(main_list: list, len_sublists):
-    groups_of_lists: list[list[str]] = []
-    for i_url, url in enumerate(main_list):
-        if i_url % len_sublists == 0:
-            groups_of_lists.append([])
-        groups_of_lists[-1].append(url)
-    return groups_of_lists
+    pp = parse_comments_page(comments_page)
+    return pp
 
 
 async def main(options):
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=options.timeout)) as session:
-        errors = []
-        while True:
-            if errors:
-                logging.info('Error detected, quitting')
-                return
-            try:
-                a_urls, c_urls = await get_urls_from_main(session, options)
+    connector = aiohttp.TCPConnector(limit=options.max_connections, enable_cleanup_closed=True)
+    async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=options.timeout),
+            connector=connector
+    ) as session:
 
-                all_comment_urls = []
-                for group in split_list(c_urls, options.max_connections):
-                    tasks = []
-                    for comments_url in group:
-                        if not comments_url:
-                            continue
-                        tasks.append(get_urls_from_comments(
-                            session=session,
-                            comments_url=MAIN_URL + comments_url,
-                            options=options
-                        ))
-                    all_comment_urls.extend(await asyncio.gather(*tasks))
+        a_urls, c_urls = await get_urls_from_main(session, options)
+        tasks = []
+        for comments_url, article_url in zip(c_urls, a_urls):
+            tasks.append(get_urls_from_comments(
+                session=session,
+                comments_url=MAIN_URL + comments_url if comments_url else None,
+                options=options
+            ))
+        all_comment_urls = await asyncio.gather(*tasks, return_exceptions=True)
 
-                for group_a, group_c in zip(
-                        split_list(a_urls, options.max_connections),
-                        split_list(all_comment_urls, options.max_connections)
-                ):
-                    tasks = []
-                    for article_url, comments_urls in zip(group_a, group_c):
-                        folder = os.path.join(options.folder, os.path.basename(article_url))
-                        if await aiofiles.os.path.exists(folder):
-                            continue
+        logging.info('collect all urls, start load and save them')
 
-                        tasks.append(download_html(session, article_url, folder, options))
-                        for c_url in comments_urls:
-                            tasks.append(download_html(session, c_url, folder, options))
-                    await asyncio.gather(*tasks)
+        tasks = []
+        for article_url, comments_urls in zip(a_urls, all_comment_urls):
+            folder = os.path.join(options.folder, os.path.basename(article_url))
+            if await aiofiles.os.path.exists(folder):
+                continue
+            tasks.append(download_html(session, article_url, folder, options))
+            if not comments_urls or isinstance(comments_urls, Exception):
+                continue
+            for c_url in comments_urls:
+                tasks.append(download_html(session, c_url, folder, options))
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-            except Exception as e:
-                logging.error(f'Unexpected error: {e}')
-                errors.append(e)
-
-            await asyncio.sleep(options.time_update)
+        await asyncio.sleep(options.time_update)
 
 if __name__ == '__main__':
     op = OptionParser()
     op.add_option("-l", "--log", action="store", default=None)
-    op.add_option("--folder", action="store", default="output")
+    op.add_option("--folder", action="store", default="/home/dmitrii/PycharmProjects/otus_hw14/output")
     op.add_option("--timeout", action="store", default=3)
     op.add_option("--max_retry", action="store", default=3)
     op.add_option("--time_retry", action="store", default=1)
     op.add_option("--time_update", action="store", default=10)
-    op.add_option("--max_connections", action="store", default=10)
+    op.add_option("--max_connections", action="store", default=3)
     (opts, args) = op.parse_args()
     logging.basicConfig(filename=opts.log, level=logging.INFO,
                         format='[%(asctime)s] %(levelname).1s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
 
     logging.info("Ycrawler started with options: %s" % opts)
     try:
-        asyncio.run(asyncio.wait_for(main(opts), opts.time_update))
+        errors = []
+        while True:
+            try:
+                if errors:
+                    logging.info('Error detected, quitting')
+                    break
+                asyncio.run(asyncio.wait_for(main(opts), opts.time_update))
+            except asyncio.exceptions.TimeoutError:
+                logging.info('force stop tasks and start again')
+            except Exception as e:
+                logging.error(f'Unexpected error: {e}')
+                errors.append(e)
     except Exception as e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
